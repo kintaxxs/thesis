@@ -30,8 +30,6 @@ class Decomposer():
         self.layer_budget = {}
         self.origin_layer_runtime = {}
         self.origin_model_runtime = 0.0
-        self.VBMF_layer_runtime = {}
-        self.VBMF_model_runtime = 0.0
         self.VBMF_layer_rank = {}
         self.constrain = opt.constrain
         self.conv_target_rate = 0.0
@@ -117,10 +115,10 @@ class Decomposer():
         self.real_model_runtime = decomp_runtime * 1000
         os.remove(save_model_name)
 
-        print('{}Origin_MAC{}: {}'.format('\033[36m', '\033[0m', self.origin_mac))
-        print('{}Origin_Weight{}: {}'.format('\033[36m', '\033[0m', self.origin_weight))
-        print('{}Pred_Origin_Runtime{}: {}'.format('\033[36m', '\033[0m', self.origin_model_runtime))
-        print('{}Real_Origin_Runtime{}: {}'.format('\033[36m', '\033[0m', self.real_model_runtime))
+        print('{}Origin_MAC{}: {}, {}Origin_Weight{}: {}'.format('\033[36m', '\033[0m', self.origin_mac, '\033[36m', '\033[0m', self.origin_weight))
+        #print('{}Origin_Weight{}: {}'.format('\033[36m', '\033[0m', self.origin_weight))
+        print('{}Pred_Origin_Runtime{}: {}, {}Real_Origin_Runtime{}: {}'.format('\033[36m', '\033[0m', self.origin_model_runtime, '\033[36m', '\033[0m', self.real_model_runtime))
+        #print('{}Real_Origin_Runtime{}: {}'.format('\033[36m', '\033[0m', self.real_model_runtime))
         print('{}Origin_Layer_Runtime{}: {}'.format('\033[36m', '\033[0m', self.origin_layer_runtime))
         print('{}Origin_Model_Constrain{}: {}'.format('\033[36m', '\033[0m', self.origin_model_constrain))
 
@@ -130,7 +128,7 @@ class Decomposer():
         print('{}Layer Importance{}: {}'.format('\033[36m', '\033[0m', self.layer_importance))
 
         # Get Layer Budget
-        self.layer_budget, self.VBMF_layer_runtime, self.VBMF_model_runtime, self.VBMF_layer_rank = self.get_layer_budget()
+        self.layer_budget, self.VBMF_layer_rank = self.get_layer_budget()
         print('{}Layer Budget{}: {}'.format('\033[36m', '\033[0m', self.layer_budget))
 
     def decompose(self):
@@ -317,12 +315,11 @@ class Decomposer():
         tmp_VBMF_layer_runtime = {}
         tmp_VBMF_model_runtime = 0.0
         tmp_VBMF_layer_rank = {}
+        importance_table = {}
 
         VBMF_model = torch.load('checkpoint/VBMF_alexnet_model')
-        #print('Travis Decomp_model_with_VBMF: {}'.format(VBMF_model))
 
         for i, k in enumerate(VBMF_model.features._modules.keys()):
-            #print('{}Travis{} : {}'.format('\033[32m', '\033[0m', VBMF_model.features._modules[k]))
             if isinstance(VBMF_model.features._modules[k], torch.nn.modules.container.Sequential):
                 conv_container = VBMF_model.features._modules[k]
                 for idx, conv_layer in enumerate(conv_container):
@@ -333,15 +330,8 @@ class Decomposer():
                 tmp_VBMF_layer_rank['conv_'+k] = [conv_layer.in_channels, conv_layer.out_channels]
 
         tmp_VBMF_model_runtime, tmp_VBMF_layer_runtime = self.get_model_predict_runtime(VBMF_model)
-        tmp_VBMF_model_runtime_without_fc, tmp_VBMF_layer_runtime_without_fc = self.get_model_predict_runtime_without_fc(VBMF_model)
 
-        #print('Travis tmp_VBMF_model_runtime: {}, tmp_VBMF_layer_runtime: {}'.format(tmp_VBMF_model_runtime, tmp_VBMF_layer_runtime))
-        print('{}Tmp_VBMF_model_runtime{}: {}'.format('\033[36m', '\033[0m', tmp_VBMF_model_runtime))
-        print('{}Tmp_VBMF_model_runtime_without_fc{}: {}'.format('\033[36m', '\033[0m', tmp_VBMF_model_runtime_without_fc))
-        print('{}Tmp_VBMF_layer_runtime{}: {}'.format('\033[36m', '\033[0m', tmp_VBMF_layer_runtime))
-        print('{}Tmp_VBMF_layer_rank{}: {}'.format('\033[36m', '\033[0m', tmp_VBMF_layer_rank))
-
-        print('{}VBMF model save ...{}'.format('\033[36m', '\033[0m'))
+        print('Travis VBMF_model_runtime: {}, VBMF_layer_runtime: {}'.format(tmp_VBMF_model_runtime, tmp_VBMF_layer_runtime))
 
         new_constrain = self.constrain
         new_constrain -= self.origin_layer_runtime['conv_0']
@@ -362,28 +352,45 @@ class Decomposer():
 
         budget = self.origin_model_constrain - new_constrain
 
-        print('Travis budget: {}, new_constrain: {}, tmp_VBMF_model_runtime_without_fc: {}'.format(budget, new_constrain, tmp_VBMF_model_runtime_without_fc))
+        print('Travis budget: {}, self.origin_model_constrain: {}, new_constrain: {}, self.constrain: {}'.format(budget, self.origin_model_constrain, new_constrain, self.constrain))
+
+        for key, value in self.layer_importance.items():
+            importance_table[key] = 1
 
         tmp_layer_budget = {}
         for key, value in self.layer_importance.items():
             print('Travis importance: ', key, value)
             tmp_layer_budget[key] = float(value * budget)
             self.search_runtime[key] = self.origin_layer_runtime[key] - float(value*budget)
-        '''
-        tmp_layer_budget = {}
-        for key, value in self.layer_importance.items():
-            print('Travis importance: ', key, value)
-            if(float(value*budget) < self.VBMF_layer_runtime[key]):
-                tmp_layer_budget[key] = self.VBMF_layer_runtime[key]
-                budget -= self.VBMF_layer_runtime[key]
-            else:
-                tmp_layer_budget[key] = float(value * budget)
-            self.search_runtime[key] = self.origin_layer_runtime[key] - float(value*budget)
-        '''
-        print('Travis search_runtime ', self.search_runtime)
+            if(tmp_VBMF_layer_runtime[key] > self.search_runtime[key]):
+                self.search_runtime[key] = tmp_VBMF_layer_runtime[key]
+                importance_table[key] = 0
+
+        total_search_runtime = sum(value for _, value in self.search_runtime.items())
+
+        print('{}Travis importance_table{}: {}'.format('\033[32m', '\033[0m', importance_table))
+
+        while(new_constrain < total_search_runtime):
+            assert sum(value for _, value in importance_table.items()) > 0
+            print('Travis new_constrain < total_search_runtime, importance_table: {}'.format(importance_table))
+            tmp_budget = total_search_runtime - new_constrain
+            print('{}Travis tmp_budget is{} {}'.format('\033[33m', '\033[0m', tmp_budget))
+            tmp_total_valid_importance = 0.0
+            for key, value in importance_table.items():
+                if(value == 1):
+                    tmp_total_valid_importance += self.layer_importance[key]
+            for key, value in importance_table.items():
+                if(value == 1):
+                    self.search_runtime[key] -= float((self.layer_importance[key]/tmp_total_valid_importance) * tmp_budget)
+                    if(tmp_VBMF_layer_runtime[key] > self.search_runtime[key]):
+                        self.search_runtime[key] = tmp_VBMF_layer_runtime[key]
+                        importance_table[key] = 0
+            total_search_runtime = sum(value for _, value in self.search_runtime.items())
+                    
+        print('Travis search_runtime: {}, total_search_time: {}'.format(self.search_runtime, total_search_runtime))
         print('Travis tmp_layer_budge  ', tmp_layer_budget)
 
-        return tmp_layer_budget, tmp_VBMF_layer_runtime, tmp_VBMF_model_runtime, tmp_VBMF_layer_rank
+        return tmp_layer_budget, tmp_VBMF_layer_rank
 
     def get_model_mac_weight(self, model):
 
