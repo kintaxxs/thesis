@@ -123,7 +123,6 @@ class Decomposer():
         print('{}Origin_Model_Constrain{}: {}'.format('\033[36m', '\033[0m', self.origin_model_constrain))
 
         # Calculate importance for each layer
-
         self.layer_importance = self.get_layer_importance()
         print('{}Layer Importance{}: {}'.format('\033[36m', '\033[0m', self.layer_importance))
 
@@ -352,7 +351,8 @@ class Decomposer():
 
         budget = self.origin_model_constrain - new_constrain
 
-        print('Travis budget: {}, self.origin_model_constrain: {}, new_constrain: {}, self.constrain: {}'.format(budget, self.origin_model_constrain, new_constrain, self.constrain))
+        print('Travis budget: {}, self.origin_model_constrain: {}, new_constrain: {}, self.constrain: {}'.\
+                format(budget, self.origin_model_constrain, new_constrain, self.constrain))
 
         for key, value in self.layer_importance.items():
             importance_table[key] = 1
@@ -501,9 +501,13 @@ class Decomposer():
     def get_layer_importance(self):
 
         layer_importance = {}
-        layer_runtime = {}
+        layer_runtime_minus_VBMF = {}
         total_runtime = 0.0
         N_classifier = len(self.model.classifier._modules.keys())
+        tmp_VBMF_layer_runtime = {}
+
+        VBMF_model = torch.load('checkpoint/VBMF_alexnet_model')
+        _, tmp_VBMF_layer_runtime = self.get_model_predict_runtime(VBMF_model)
 
         for i, key in enumerate(self.model.features._modules.keys()):
             if i == 0:
@@ -512,10 +516,11 @@ class Decomposer():
                 conv_layer = self.model.features._modules[key]
                 tmp_ms = self.estimate_with_config([self.model_image_size[key][0], conv_layer.in_channels, conv_layer.out_channels, \
                         conv_layer.kernel_size[0], conv_layer.stride[0], conv_layer.padding[0]])
-                layer_runtime['conv_'+key] = tmp_ms
-                total_runtime += tmp_ms
+                layer_runtime_minus_VBMF['conv_'+key] = tmp_ms - tmp_VBMF_layer_runtime['conv_'+key]
+                total_runtime += tmp_ms - tmp_VBMF_layer_runtime['conv_'+key]
 
-        for key, value in layer_runtime.items():
+        for key, value in layer_runtime_minus_VBMF.items():
+            #print('Travis key: {}, Layer_runtime: {}, VBMF_layer_runtime: {}'.format(key, layer_runtime[key], tmp_VBMF_layer_runtime))
             layer_importance[key] = float(value/total_runtime)
 
         print('Travis get_layer_importance layer_importance: {} total_runtime: {}'.format(layer_importance, total_runtime))
