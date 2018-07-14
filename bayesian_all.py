@@ -39,6 +39,7 @@ class Decomposer():
         self.remain_budget = 0.0
         self.origin_model_constrain = 0.0
         self.search_runtime = {}
+        self.bayesian_iter = {}
 
         # Configure Logger
         self.logger = logging.getLogger()
@@ -144,25 +145,41 @@ class Decomposer():
         print('-------------> Decomposition Finish')
         print('Final Fine_tune ...')
         fine_tune(self.model, 30)
-        fine_tune_test(self.model, self.testloader, True)
+        acc = fine_tune_test(self.model, self.testloader, True)
         print('The Decomposed Model ...')
         print(self.model)
         mac, weight = self.get_model_mac_weight(self.model)
+        '''
 	#deploy to target
         save_model_name = export_onnx_model(self.model)
         decomp_runtime = deploy_by_rpc(save_model_name)
         self.decomp_runtime_ms = decomp_runtime * 1000
         os.remove(save_model_name)
-
+        '''
         tmp_decomp_predict_runtime, tmp_decomp_layer_runtime = self.get_model_predict_runtime(self.model)
 
         print('Origin_MAC: {}, Origin_Weight: {}, Origin_Runtime: {}, Origin_Predict_Runtime: {}'.format(self.origin_mac, self.origin_weight, self.real_model_runtime, self.origin_model_runtime))
-        print('Decomp_MAC: {}, Decomp_Weight: {}, Decomp_Runtime: {}, Decomp_Predict_Runtime: {}'.format(mac, weight, self.decomp_runtime_ms, tmp_decomp_predict_runtime))
-        print('Speedup : {}'.format(float(self.real_model_runtime/self.decomp_runtime_ms)))
+        #print('Decomp_MAC: {}, Decomp_Weight: {}, Decomp_Runtime: {}, Decomp_Predict_Runtime: {}'.format(mac, weight, self.decomp_runtime_ms, tmp_decomp_predict_runtime))
+        print('Decomp_MAC: {}, Decomp_Weight: {}, Decomp_Predict_Runtime: {}'.format(mac, weight, tmp_decomp_predict_runtime))
+        print('ACC: {}'.format(acc))
+        #print('Speedup : {}'.format(float(self.real_model_runtime/self.decomp_runtime_ms)))
 
-        torch.save(self.model, 'result/decomposed/' + str(self.constrain) + '_alexnet_model')
+        state = {
+                'model':self.model,
+		'bayesian_iter':self.bayesian_iter,
+                'acc':acc,
+                #'real_runtime':self.decomp_runtime_ms,
+                #'predict_runtime':tmp_decomp_predict_ms,
+                'mac':mac,
+                'weight':weight
+                }
+
+        torch.save(state, 'result/all_decomposed/' + str(self.constrain) + '_alexnet_model')
 
     def conv_decomposition(self):
+
+        VBMF_model = torch.load('checkpoint/VBMF_alexnet_model')
+        _, tmp_VBMF_layer_runtime = self.get_model_predict_runtime(VBMF_model)
 
         #remain_budget = 0.0
         for i, key in enumerate(self.model.features._modules.keys()):
@@ -181,14 +198,34 @@ class Decomposer():
                 self.decomposed_layer_info['stride'] = conv_layer_to_decompose.stride[0]
                 self.decomposed_layer_info['padding'] = conv_layer_to_decompose.padding[0]
 
-                self.conv_target_rate = 0.0
+                if(self.constrain == 0):
+                    self.conv_target_rate = 0.5
+                else:
+                    self.conv_target_rate = 0.0
+                beta = 1
+                last_search_time = 1000000
                 iteration_count = 0
                 while(True):
+
+                    '''
+                    # prevent TVM from disconnecting
+                    save_model_name = export_onnx_model(self.model)
+                    _ = deploy_by_rpc(save_model_name)
+                    os.remove(save_model_name)
+                    '''
+
                     print('{}Iteration{}'.format('\033[31m', '\033[0m'))
                     print('{}-----------------------------------------{}'.format('\033[94m', '\033[0m'))
                     print('Iteration {}{}{} Target_Rate: {}{}{}'.format('\033[32m', iteration_count, '\033[0m', '\033[32m', self.conv_target_rate, '\033[0m'))
                     iteration_count += 1
-                    ranks = self.conv_bayesian([conv_layer_to_decompose.in_channels, conv_layer_to_decompose.out_channels])
+                    if(self.search_runtime['conv_'+key] == tmp_VBMF_layer_runtime['conv_'+key]):
+                        ranks = [self.VBMF_layer_rank['conv_'+key][0], self.VBMF_layer_rank['conv_'+key][1]]
+                        b_iter = 0 
+                    else:
+                        ranks, b_iter = self.conv_bayesian([conv_layer_to_decompose.in_channels, conv_layer_to_decompose.out_channels])
+
+                    self.bayesian_iter['conv_'+key] = b_iter
+                    #ranks = self.conv_bayesian([conv_layer_to_decompose.in_channels, conv_layer_to_decompose.out_channels])
                     tmp_ms_1 = self.estimate_with_config([self.decomposed_layer_info['image_size'], \
                                                         conv_layer_to_decompose.in_channels, ranks[0], \
                                                         1, \
@@ -221,7 +258,15 @@ class Decomposer():
                             break
                         else:
                             print('Update the objective function ...')
-                            self.conv_target_rate += 0.1
+                            if(last_search_time < tmp_runtime_ms):
+                                beta += 0.5
+                            else:
+                                last_search_time = tmp_runtime_ms
+
+                            if(iteration_count >= 10):
+                                beta += 0.5
+
+                            self.conv_target_rate += beta
                             print('Travis Constrain: {}, Search_runtime: {}, Layer_budget: {}, Remain_budget: {}'.format(self.constrain, \
                                                                     tmp_runtime_ms, \
                                                                     self.search_runtime['conv_'+key], self.remain_budget))
@@ -236,6 +281,10 @@ class Decomposer():
                 fine_tune_test(self.model, self.testloader, True)
 
     def fc_decomposition(self):
+
+        VBMF_model = torch.load('checkpoint/VBMF_alexnet_model')
+        _, tmp_VBMF_layer_runtime = self.get_model_predict_runtime(VBMF_model)
+
         #remain_budget = 0.0
         N_classifier = len(self.model.classifier._modules.keys())
         for i, key in enumerate(self.model.classifier._modules.keys()):
@@ -250,14 +299,43 @@ class Decomposer():
                 print(self.estimate(fc_layer_to_decompose, key))
                 self.decomposed_layer_info['key'] = key 
 
-                self.fc_target_rate = 0 
+                if(self.constrain == 0):
+                    sels.fc_target_rate = 0.5
+                else:
+                    self.fc_target_rate = 0 
+                beta = 0.5
+                last_search_time = 1000000
                 iteration_count = 0 
                 while(True):
+                    '''
+                    # prevent TVM from disconnecting
+                    save_model_name = export_onnx_model(self.model)
+                    _ = deploy_by_rpc(save_model_name)
+                    os.remove(save_model_name)
+                    '''
                     print('{}Iteration{}'.format('\033[31m', '\033[0m'))
                     print('{}-----------------------------------------{}'.format('\033[94m', '\033[0m'))
                     print('Iteration {}{}{} Target_Rate: {}{}{}'.format('\033[32m', iteration_count, '\033[0m', '\033[32m', self.fc_target_rate, '\033[0m'))
                     iteration_count += 1
-                    rank = self.fc_bayesian(fc_layer_to_decompose.in_features*fc_layer_to_decompose.out_features//(fc_layer_to_decompose.in_features+fc_layer_to_decompose.out_features))
+                    if(self.search_runtime['fc_'+key] == tmp_VBMF_layer_runtime['fc_'+key]):
+                        rank = [self.VBMF_layer_rank['fc_'+key][0]]
+                        b_iter = 0 
+                    else:
+                        rank, b_iter  = self.fc_bayesian(fc_layer_to_decompose.in_features*fc_layer_to_decompose.out_features//(fc_layer_to_decompose.in_features+fc_layer_to_decompose.out_features))
+                        '''
+                        if(key == '4'):
+                            if(iteration_count == 1):
+                                rank = 1500
+                            else:
+                                rank = 1500 * (0.9**(iteration_count-1))
+                            rank = [int(rank)]
+                            b_iter = 0
+                        else:
+                            rank, b_iter  = self.fc_bayesian(fc_layer_to_decompose.in_features*fc_layer_to_decompose.out_features//(fc_layer_to_decompose.in_features+fc_layer_to_decompose.out_features))
+                        '''
+
+                    self.bayesian_iter['fc_'+key] = b_iter
+                    #rank = self.fc_bayesian(fc_layer_to_decompose.in_features*fc_layer_to_decompose.out_features//(fc_layer_to_decompose.in_features+fc_layer_to_decompose.out_features))
                     tmp_ms_1 = self.estimate_with_config([fc_layer_to_decompose.in_features, rank[0]])
                     tmp_ms_2 = self.estimate_with_config([rank[0], fc_layer_to_decompose.out_features])
                     tmp_runtime_ms = tmp_ms_1 + tmp_ms_2
@@ -276,7 +354,13 @@ class Decomposer():
                             break
                         else:
                             print('Update the objective function ...')
-                            self.fc_target_rate += 0.1 
+                            if(last_search_time < tmp_runtime_ms):
+                                beta += 0.25
+                            else:
+                                last_search_time = tmp_runtime_ms
+                            if(iteration_count >= 10):
+                                beta += 0.25
+                            self.fc_target_rate += beta
                             print('Travis Constrain: {}, Search_runtime: {}, Layer_budget: {}, Remain_budget: {}'.format(self.constrain, \
                                                                     tmp_runtime_ms, \
                                                                     self.search_runtime['fc_'+key], self.remain_budget))
@@ -294,13 +378,24 @@ class Decomposer():
                                                     'out_channel': (self.VBMF_layer_rank['conv_'+self.decomposed_layer_info['key']][1]+1, ranks[1])})
         gp_params = {'kernel': None,
                     'alpha': 1e-5,
-                    'kappa': 2}
+                    'kappa': 1}
         bo.maximize(init_points=2, n_iter=0, acq='ucb', **gp_params)
-        bo.maximize(init_points=0, n_iter=2, acq='ucb', **gp_params)
+        bo.maximize(init_points=0, n_iter=75, acq='ucb', **gp_params)
         print(bo.res['max'])
-        return [int(bo.res['max']['max_params']['in_channel']), int(bo.res['max']['max_params']['out_channel'])]
+
+        iteration = 0
+        for i, value in enumerate(bo.res['all']['params']):
+            if(value['in_channel'] == bo.res['max']['max_params']['in_channel'] and\
+                    value['out_channel'] == bo.res['max']['max_params']['out_channel']):
+                #print('Travis i: {}'.format(i+1))
+                iteration = i + 1
+                break
+        iteration = 1 if iteration == 0 else iteration
+
+        return [int(bo.res['max']['max_params']['in_channel']), int(bo.res['max']['max_params']['out_channel'])], iteration
 
     def fc_bayesian(self, rank):
+
         print(self.decomposed_layer_info['key'])
         print(self.VBMF_layer_rank['fc_'+self.decomposed_layer_info['key']][0], type(self.VBMF_layer_rank['fc_'+self.decomposed_layer_info['key']]))
         print('{}Travis{} : {} Rank: {}'.format('\33[33m', '\33[0m', self.decomposed_layer_info['key'], self.VBMF_layer_rank['fc_'+self.decomposed_layer_info['key']][0]))
@@ -308,11 +403,18 @@ class Decomposer():
         #bo = BayesianOptimization(self.fc_target, {'rank': (2 , rank)})
         gp_params = {'kernel': None,
                     'alpha': 1e-5,
-                    'kappa': 2}
+                    'kappa': 1}
         bo.maximize(init_points=2, n_iter=0, acq='ucb', **gp_params)
-        bo.maximize(init_points=0, n_iter=2, acq='ucb', **gp_params)
+        bo.maximize(init_points=0, n_iter=20, acq='ucb', **gp_params)
         print(bo.res['max'])
-        return [int(bo.res['max']['max_params']['rank'])]
+        iteration = 0
+        for i, value in enumerate(bo.res['all']['params']):
+            if(value['rank'] == bo.res['max']['max_params']['rank']):
+                #print('Travis i: {}'.format(i+1))
+                iteration = i + 1
+                break
+        iteration = 1 if iteration == 0 else iteration
+        return [int(bo.res['max']['max_params']['rank'])], iteration
 
     def conv_target(self, in_channel, out_channel):
 
@@ -331,11 +433,14 @@ class Decomposer():
         # Tucker decomposed
         decompose = tucker_decomposition_conv_layer_without_rank(decomp_model.features._modules[self.decomposed_layer_info['key']],rank)
         assert isinstance(decompose, torch.nn.modules.container.Sequential)
+        '''
         for i in decompose:
             assert isinstance(i, torch.nn.modules.conv.Conv2d)
             tmp_ms = self.estimate_with_config([self.decomposed_layer_info['image_size'], i.in_channels, i.out_channels, i.kernel_size[0], i.stride[0], i.padding[0]])
             runtime_ms += tmp_ms
+        '''
         decomp_model.features._modules[self.decomposed_layer_info['key']] = decompose
+        runtime_ms, _ = self.get_model_predict_runtime(decomp_model)
         decomp_model.cuda()
         decomp_model.eval()
         #print('Travis decomp_model: {}'.format(decomp_model))
@@ -359,9 +464,11 @@ class Decomposer():
         acc = 100.*correct/total
         #print('Travis acc: {}, Travis runtime: {}, Value: {}'.format(acc, runtime_ms, -1*(100-acc)*(runtime_ms**0.1)))
         assert (runtime_ms**self.conv_target_rate) > 0
-        print('{}Travis{} runtime: {}'.format('\033[36m', '\033[0m', runtime_ms))
-        assert runtime_ms > 0
-        return -1 * ((100-acc)**1) * (runtime_ms**self.conv_target_rate)
+        #print('{}Travis{} runtime: {}'.format('\033[36m', '\033[0m', runtime_ms))
+        assert runtime_ms > 1
+        #print('{}Travis{} conv_target  error: {}, runtime_ms: {}'.format('\033[36m', '\033[0m', acc, runtime_ms))
+        #return -1 * ((100-acc)**1) * (runtime_ms**self.conv_target_rate)
+        return -1 * (100-acc) + -1 * (runtime_ms*self.conv_target_rate)
 
     def fc_target(self, rank):
 
@@ -372,13 +479,18 @@ class Decomposer():
         decomp_model.cuda()
 
         # Tucker decomposed
+        print('Travis 1')
         decompose = tucker_decomposition_fc_layer_without_rank(decomp_model.classifier._modules[self.decomposed_layer_info['key']],rank)
+        print('Travis 2')
         assert isinstance(decompose, torch.nn.modules.container.Sequential)
+        '''
         for i in decompose:
             assert isinstance(i, torch.nn.modules.linear.Linear)
             tmp_ms = self.estimate_with_config([i.in_features, i.out_features])
             runtime_ms += tmp_ms
+        '''
         decomp_model.classifier._modules[self.decomposed_layer_info['key']] = decompose
+        runtime_ms, _ = self.get_model_predict_runtime(decomp_model)
         decomp_model.cuda()
         decomp_model.eval()
         #print('Travis decomp_model: {}'.format(decomp_model))
@@ -402,8 +514,10 @@ class Decomposer():
         acc = 100.*correct/total
         #print('Travis acc: {}, Travis runtime: {}, Value: {}'.format(acc, runtime_ms, -1*(100-acc)*(runtime_ms**0.1)))
         assert (runtime_ms**self.fc_target_rate) > 0
-        assert runtime_ms > 0
-        return -1 * (100-acc) * (runtime_ms**self.fc_target_rate)
+        assert runtime_ms > 1
+        #print('{}Travis{} fc_target  error: {}, runtime_ms: {}'.format('\033[36m', '\033[0m', acc, runtime_ms))
+        #return -1 * (100-acc) * (runtime_ms**self.fc_target_rate)
+        return -1 * (100-acc) + -1 * (runtime_ms*self.fc_target_rate)
 
     def estimate(self, layer, key):
         if isinstance(layer, torch.nn.modules.conv.Conv2d):
@@ -471,22 +585,22 @@ class Decomposer():
         print('{}Travis importance_table{}: {}'.format('\033[32m', '\033[0m', importance_table))
         print('{}Travis unchanged search_runtime{}: {}'.format('\033[32m', '\033[0m', self.search_runtime))
 
-        while(new_constrain < total_search_runtime):
-            assert sum(value for _, value in importance_table.items()) > 0
-            print('Travis new_constrain < total_search_runtime, importance_table: {}'.format(importance_table))
-            tmp_budget = total_search_runtime - new_constrain
-            print('{}Travis tmp_budget is{} {}'.format('\033[33m', '\033[0m', tmp_budget))
-            tmp_total_valid_importance = 0.0
-            for key, value in importance_table.items():
-                if(value == 1):
-                    tmp_total_valid_importance += self.layer_importance[key]
-            for key, value in importance_table.items():
-                if(value == 1):
-                    self.search_runtime[key] -= float((self.layer_importance[key]/tmp_total_valid_importance) * tmp_budget)
-                    if(tmp_VBMF_layer_runtime[key] > self.search_runtime[key]):
-                        self.search_runtime[key] = tmp_VBMF_layer_runtime[key]
-                        importance_table[key] = 0
-            total_search_runtime = sum(value for _, value in self.search_runtime.items())
+        if(sum(value for _, value in importance_table.items()) > 0):
+            while(new_constrain < total_search_runtime):
+                print('Travis new_constrain < total_search_runtime, importance_table: {}'.format(importance_table))
+                tmp_budget = total_search_runtime - new_constrain
+                print('{}Travis tmp_budget is{} {}'.format('\033[33m', '\033[0m', tmp_budget))
+                tmp_total_valid_importance = 0.0
+                for key, value in importance_table.items():
+                    if(value == 1):
+                        tmp_total_valid_importance += self.layer_importance[key]
+                for key, value in importance_table.items():
+                    if(value == 1):
+                        self.search_runtime[key] -= float((self.layer_importance[key]/tmp_total_valid_importance) * tmp_budget)
+                        if(tmp_VBMF_layer_runtime[key] > self.search_runtime[key]):
+                            self.search_runtime[key] = tmp_VBMF_layer_runtime[key]
+                            importance_table[key] = 0
+                total_search_runtime = sum(value for _, value in self.search_runtime.items())
                     
         print('Travis search_runtime: {}, total_search_time: {}'.format(self.search_runtime, total_search_runtime))
         #print('Travis tmp_layer_budge  ', tmp_layer_budget)
@@ -648,9 +762,13 @@ class Decomposer():
     def get_layer_importance(self):
 
         layer_importance = {}
-        layer_runtime = {}
+        layer_runtime_minus_VBMF = {}
         total_runtime = 0.0
         N_classifier = len(self.model.classifier._modules.keys())
+        tmp_VBMF_layer_runtime = {}
+
+        VBMF_model = torch.load('checkpoint/VBMF_alexnet_model')
+        _, tmp_VBMF_layer_runtime = self.get_model_predict_runtime(VBMF_model)
 
         for i, key in enumerate(self.model.features._modules.keys()):
             if i == 0:
@@ -659,8 +777,8 @@ class Decomposer():
                 conv_layer = self.model.features._modules[key]
                 tmp_ms = self.estimate_with_config([self.model_image_size[key][0], conv_layer.in_channels, conv_layer.out_channels, \
                         conv_layer.kernel_size[0], conv_layer.stride[0], conv_layer.padding[0]])
-                layer_runtime['conv_'+key] = tmp_ms
-                total_runtime += tmp_ms
+                layer_runtime_minus_VBMF['conv_'+key] = tmp_ms - tmp_VBMF_layer_runtime['conv_'+key]
+                total_runtime += tmp_ms - tmp_VBMF_layer_runtime['conv_'+key]
 
         for i, key in enumerate(self.model.classifier._modules.keys()):
             if i >= N_classifier - 2:
@@ -668,10 +786,10 @@ class Decomposer():
             if isinstance(self.model.classifier._modules[key], torch.nn.modules.linear.Linear):
                 fc_layer = self.model.classifier._modules[key]
                 tmp_ms = self.estimate_with_config([fc_layer.in_features, fc_layer.out_features])
-                layer_runtime['fc_'+key] = tmp_ms
-                total_runtime += tmp_ms
+                layer_runtime_minus_VBMF['fc_'+key] = tmp_ms - tmp_VBMF_layer_runtime['fc_'+key]
+                total_runtime += tmp_ms - tmp_VBMF_layer_runtime['fc_'+key]
  
-        for key, value in layer_runtime.items():
+        for key, value in layer_runtime_minus_VBMF.items():
             layer_importance[key] = float(value/total_runtime)
 
         #print('Travis get_layer_importance layer_importance: {} total_runtime: {}'.format(layer_importance, total_runtime))

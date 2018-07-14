@@ -7,6 +7,10 @@ import torchvision.transforms as transforms
 from utils.fine_tune import fine_tune, fine_tune_test
 from utils.estimator import Estimator
 import os
+from models import *
+
+def test(**kwargs):
+    model = vgg()
 
 def print_model(**kwargs):
     opt.parse(kwargs)
@@ -30,7 +34,7 @@ def print_model(**kwargs):
         model = model['net']
 
     model = model.cuda()
-    model, acc = fine_tune(model, True)
+    #model, acc = fine_tune(model, True)
     best_acc = fine_tune_test(model, testloader, True)
     print(best_acc)
 
@@ -44,8 +48,8 @@ def print_model(**kwargs):
     #print('Mac: {}, Weight: {}'.format(total_mac, total_weight))
 
     # Calculate Image_size for each layer
-    model_image_size = {'0': [32, 16], '2': [16, 8], '3': [8, 8], '5': [8, 4], '6': [4, 4], '8': [4, 4], '10': [4, 4], '12': [4, 2]}
-    '''
+    #model_image_size = {'0': [32, 16], '2': [16, 8], '3': [8, 8], '5': [8, 4], '6': [4, 4], '8': [4, 4], '10': [4, 4], '12': [4, 2]}
+    model_image_size = {}
     in_image_size = 32
     for i, key in enumerate(model.features._modules.keys()):
         if isinstance(model.features._modules[key], torch.nn.modules.conv.Conv2d):
@@ -58,7 +62,6 @@ def print_model(**kwargs):
             after_image_size = ((in_image_size - maxpool_layer.kernel_size) // maxpool_layer.stride )+ 1
             model_image_size[key] = [in_image_size, after_image_size]
             in_image_size = after_image_size
-    '''
     print('{}Image_Size{}: {}'.format('\033[36m', '\033[0m', model_image_size))
 
     #Get the Predicted Runtime
